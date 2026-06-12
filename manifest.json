@@ -1,0 +1,10 @@
+{
+    "display_name": "Fortuna",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "author": "Judas (sinnerconsort)",
+    "version": "1.0.0",
+    "homePage": ""
+}
