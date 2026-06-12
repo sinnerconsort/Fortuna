@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- *  FORTUNA v1.0.0 — The Fates roll, the prose obeys.
+ *  FORTUNA v1.0.2 — The Fates roll, the prose obeys.
  * ═══════════════════════════════════════════════════════════════════
  *  Honest dice for SillyTavern. JS rolls (real rejection sampling,
  *  because we keep our promises), the model only narrates.
@@ -29,16 +29,31 @@
  */
 
 import { getContext, extension_settings } from '../../../extensions.js';
-import {
-    eventSource,
-    event_types,
-    saveSettingsDebounced,
-    saveChatDebounced,
-    chat_metadata,
-    setExtensionPrompt,
-    extension_prompt_types,
-    extension_prompt_roles,
-} from '../../../../script.js';
+
+// ── Paranoid plumbing: zero script.js imports. One bad named export
+// kills an ES module at link time with no visible error, so everything
+// runs through getContext() at call time instead. Enum values hardcoded
+// (stable across ST versions).
+const PROMPT_IN_CHAT = 1;   // extension_prompt_types.IN_CHAT
+const ROLE_SYSTEM = 0;      // extension_prompt_roles.SYSTEM
+
+const ctx = () => getContext();
+const ET = () => { const c = ctx(); return c.eventTypes || c.event_types || {}; };
+const ES = () => ctx().eventSource;
+function chatMeta() {
+    const c = ctx();
+    const m = c.chatMetadata || c.chat_metadata;
+    return m || {};
+}
+function saveSettingsDebounced() { try { ctx().saveSettingsDebounced(); } catch (e) { /* */ } }
+function doSaveChat() {
+    const c = ctx();
+    try { (c.saveChatDebounced || c.saveChat || (() => {}))(); } catch (e) { /* */ }
+}
+function stSetExtensionPrompt(...args) {
+    const c = ctx();
+    if (typeof c.setExtensionPrompt === 'function') c.setExtensionPrompt(...args);
+}
 
 const EXT_ID = 'fortuna';
 const TAG = '[Fortuna]';
@@ -73,10 +88,11 @@ function saveSettings() { saveSettingsDebounced(); }
 
 // per-chat: snooze flag
 function chatState() {
-    if (!chat_metadata[EXT_ID]) chat_metadata[EXT_ID] = { snooze: false };
-    return chat_metadata[EXT_ID];
+    const m = chatMeta();
+    if (!m[EXT_ID]) m[EXT_ID] = { snooze: false };
+    return m[EXT_ID];
 }
-function saveChatState() { try { saveChatDebounced(); } catch (e) { /* non-critical */ } }
+function saveChatState() { doSaveChat(); }
 
 // ─────────────────────────────────────────────────────────────────
 // Honest randomness (rejection sampling — the real kind)
@@ -179,13 +195,13 @@ function buildInjection(roll) {
 function applyInjection(roll) {
     const s = settings();
     try {
-        setExtensionPrompt(
+        stSetExtensionPrompt(
             INJECT_KEY,
             buildInjection(roll),
-            extension_prompt_types?.IN_CHAT ?? 1,
+            PROMPT_IN_CHAT,
             s.injectionDepth,
             false,
-            extension_prompt_roles?.SYSTEM ?? 0,
+            ROLE_SYSTEM,
         );
     } catch (e) {
         console.error(TAG, 'injection failed', e);
@@ -193,7 +209,7 @@ function applyInjection(roll) {
 }
 
 function clearInjection() {
-    try { setExtensionPrompt(INJECT_KEY, '', extension_prompt_types?.IN_CHAT ?? 1, 0); } catch (e) { /* */ }
+    try { stSetExtensionPrompt(INJECT_KEY, '', PROMPT_IN_CHAT, 0); } catch (e) { /* */ }
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -226,8 +242,8 @@ function onGenerationAfterCommands(type, _options, dryRun) {
 function onMessageReceived(mesId) {
     try {
         if (!pendingRoll) return;
-        const ctx = getContext();
-        const message = ctx?.chat?.[mesId];
+        const c = ctx();
+        const message = c?.chat?.[mesId];
         if (!message || message.is_user) return;
 
         if (!message.extra) message.extra = {};
@@ -247,8 +263,8 @@ function onMessageReceived(mesId) {
 
 function onMessageSwiped(mesId) {
     try {
-        const ctx = getContext();
-        const message = ctx?.chat?.[mesId];
+        const c = ctx();
+        const message = c?.chat?.[mesId];
         if (!message) return;
         const swipeId = message.swipe_id ?? 0;
         const stored = message.extra?.[EXT_ID + '_swipes']?.[swipeId];
@@ -285,8 +301,8 @@ function chipHtml(roll, snoozedAtTime) {
 
 function renderChipFor(mesId) {
     try {
-        const ctx = getContext();
-        const message = ctx?.chat?.[mesId];
+        const c = ctx();
+        const message = c?.chat?.[mesId];
         const $mes = $(`#chat .mes[mesid="${mesId}"]`);
         if (!$mes.length) return;
         $mes.find('.fortuna-chip, .fortuna-detail').remove();
@@ -301,8 +317,8 @@ function renderChipFor(mesId) {
 
 function renderAllChips() {
     try {
-        const ctx = getContext();
-        if (!ctx?.chat) return;
+        const c = ctx();
+        if (!c?.chat) return;
         $('#chat .mes').each(function () {
             const mesId = Number($(this).attr('mesid'));
             if (!Number.isNaN(mesId)) renderChipFor(mesId);
@@ -535,13 +551,14 @@ function cmdDebug() {
     return '';
 }
 
-function registerCommands() {
-    const ctx = getContext();
+async function registerCommands() {
+    // Layer 1: direct module imports (canonical, modern ST) — dynamic so a
+    // missing module degrades gracefully instead of killing the extension.
     try {
-        const P = ctx.SlashCommandParser;
-        const C = ctx.SlashCommand;
-        const A = ctx.SlashCommandArgument;
-        const T = ctx.ARGUMENT_TYPE;
+        const { SlashCommandParser } = await import('../../../slash-commands/SlashCommandParser.js');
+        const { SlashCommand } = await import('../../../slash-commands/SlashCommand.js');
+        const { SlashCommandArgument, ARGUMENT_TYPE } = await import('../../../slash-commands/SlashCommandArgument.js');
+        const P = SlashCommandParser, C = SlashCommand, A = SlashCommandArgument, T = ARGUMENT_TYPE;
         if (P?.addCommandObject && C?.fromProps) {
             P.addCommandObject(C.fromProps({
                 name: 'fortuna-roll',
@@ -559,17 +576,33 @@ function registerCommands() {
                 callback: cmdDebug,
                 helpString: 'Show Fortuna state as a toast.',
             }));
+            console.log(TAG, 'slash commands registered (modern parser)');
             return;
         }
-    } catch (e) { /* fall through to legacy */ }
+    } catch (e) {
+        console.warn(TAG, 'modern slash-command modules unavailable, trying legacy', e);
+    }
+    // Layer 2: legacy registerSlashCommand — try context, script.js export, and window
     try {
-        if (typeof ctx.registerSlashCommand === 'function') {
-            ctx.registerSlashCommand('fortuna-roll', (_a, v) => cmdRoll(_a, v), [], '– roll honest dice (default 1d20)', true, true);
-            ctx.registerSlashCommand('fortuna-snooze', () => cmdSnooze(), [], '– toggle scene snooze', true, true);
-            ctx.registerSlashCommand('fortuna-debug', () => cmdDebug(), [], '– show Fortuna state', true, true);
+        const c = ctx();
+        let legacy = c?.registerSlashCommand || window.registerSlashCommand;
+        if (!legacy) {
+            try {
+                const script = await import('../../../../script.js');
+                legacy = script.registerSlashCommand;
+            } catch (_) { /* */ }
         }
+        if (typeof legacy === 'function') {
+            legacy('fortuna-roll', (_a, v) => cmdRoll(_a, v), [], '– roll honest dice (default 1d20)', true, true);
+            legacy('fortuna-snooze', () => cmdSnooze(), [], '– toggle scene snooze', true, true);
+            legacy('fortuna-debug', () => cmdDebug(), [], '– show Fortuna state', true, true);
+            console.log(TAG, 'slash commands registered (legacy)');
+            return;
+        }
+        throw new Error('no registration API found');
     } catch (e) {
         console.error(TAG, 'slash command registration failed entirely', e);
+        try { toastr.warning('Slash commands unavailable on this ST version — FAB panel still works.', '🎲 Fortuna'); } catch (_) { /* */ }
     }
 }
 
@@ -577,19 +610,28 @@ function registerCommands() {
 // Events + init
 // ─────────────────────────────────────────────────────────────────
 
+function on(eventName, fn, label) {
+    if (!eventName) {
+        console.warn(TAG, 'missing event type:', label);
+        return;
+    }
+    ES().on(eventName, fn);
+}
+
 function registerEvents() {
-    eventSource.on(event_types.GENERATION_AFTER_COMMANDS, onGenerationAfterCommands);
-    eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
-    eventSource.on(event_types.MESSAGE_SWIPED, onMessageSwiped);
-    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, (mesId) => renderChipFor(Number(mesId)));
-    eventSource.on(event_types.CHAT_CHANGED, () => {
+    const t = ET();
+    on(t.GENERATION_AFTER_COMMANDS, onGenerationAfterCommands, 'GENERATION_AFTER_COMMANDS');
+    on(t.MESSAGE_RECEIVED, onMessageReceived, 'MESSAGE_RECEIVED');
+    on(t.MESSAGE_SWIPED, onMessageSwiped, 'MESSAGE_SWIPED');
+    on(t.CHARACTER_MESSAGE_RENDERED, (mesId) => renderChipFor(Number(mesId)), 'CHARACTER_MESSAGE_RENDERED');
+    on(t.CHAT_CHANGED, () => {
         pendingRoll = null;
         pinnedRoll = null;
         clearInjection();
         setTimeout(renderAllChips, 300);
         refreshPanel();
-    });
-    eventSource.on(event_types.GENERATION_STOPPED, () => { pendingRoll = null; });
+    }, 'CHAT_CHANGED');
+    on(t.GENERATION_STOPPED, () => { pendingRoll = null; }, 'GENERATION_STOPPED');
 }
 
 // FUTURE — CODEX BRIDGE (do not build until Codex visibility pass ships):
@@ -602,9 +644,10 @@ jQuery(async () => {
         settings(); // hydrate defaults
         initUI();
         registerEvents();
-        registerCommands();
+        await registerCommands();
         setTimeout(renderAllChips, 1000);
         console.log(TAG, '✅ the Fates are watching');
+        try { toastr.success('v1.0.2 loaded — the Fates are watching.', '🎲 Fortuna', { timeOut: 3000 }); } catch (_) { /* */ }
     } catch (e) {
         console.error(TAG, '❌ critical failure', e);
         try { toastr.error('Fortuna failed to initialize.', 'Fortuna', { timeOut: 10000 }); } catch (_) { /* */ }
