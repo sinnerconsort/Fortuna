@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- *  FORTUNA v1.0.3 — The Fates roll, the prose obeys.
+ *  FORTUNA v1.0.4 — The Fates roll, the prose obeys.
  * ═══════════════════════════════════════════════════════════════════
  *  Honest dice for SillyTavern. JS rolls (real rejection sampling,
  *  because we keep our promises), the model only narrates.
@@ -335,56 +335,71 @@ $(document).on('click', '.fortuna-chip', function () {
 // FAB + panel (mobile-first, inline styles, trap probe mount)
 // ─────────────────────────────────────────────────────────────────
 
-const FAB_STYLE = `position:fixed;right:15px;bottom:290px;width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#5a4a7a,#2e2542);color:#e8e0f5;border:2px solid rgba(212,175,55,0.75);box-shadow:0 2px 8px rgba(0,0,0,0.45);z-index:${Z};display:flex;align-items:center;justify-content:center;font-size:18px;cursor:pointer;touch-action:none;`;
-const PANEL_STYLE = `position:fixed;right:10px;bottom:230px;width:min(280px, calc(100vw - 20px));background:rgba(24,19,36,0.97);border:1px solid rgba(180,160,220,0.35);border-radius:12px;padding:12px;z-index:${Z};color:#e8e0f5;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,0.55);display:none;`;
+const FAB_STYLE = `position:fixed;left:0;top:0;width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#5a4a7a,#2e2542);color:#e8e0f5;border:2px solid rgba(212,175,55,0.75);box-shadow:0 2px 8px rgba(0,0,0,0.45);z-index:${Z};display:flex;align-items:center;justify-content:center;font-size:18px;cursor:pointer;touch-action:none;`;
+const PANEL_STYLE = `position:fixed;left:0;top:0;width:min(280px, calc(100vw - 20px));background:rgba(24,19,36,0.97);border:1px solid rgba(180,160,220,0.35);border-radius:12px;padding:12px;z-index:${Z};color:#e8e0f5;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,0.55);display:none;`;
 const ROW = 'display:flex;align-items:center;justify-content:space-between;gap:8px;margin:7px 0;';
 const SELECT = 'background:#1c1530;color:#e8e0f5;border:1px solid rgba(180,160,220,0.3);border-radius:6px;padding:3px 6px;font-size:12px;max-width:140px;';
 const BTN = 'background:#3a2f55;color:#e8e0f5;border:1px solid rgba(180,160,220,0.3);border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer;flex:1;text-align:center;';
 
+const FAB_W = 40, FAB_H = 40, PAD = 5;
+
+function clampFabPos(left, top) {
+    return {
+        left: Math.max(PAD, Math.min(window.innerWidth - FAB_W - PAD, left)),
+        top: Math.max(PAD, Math.min(window.innerHeight - FAB_H - PAD, top)),
+    };
+}
+
+function defaultFabPos() {
+    // right edge, ~55% down — clear of Spark/Lexicon stack lower-right
+    return clampFabPos(window.innerWidth - FAB_W - 15, Math.round(window.innerHeight * 0.55));
+}
+
+function applyFabPos($fab, pos) {
+    $fab.css({ left: pos.left + 'px', top: pos.top + 'px', right: 'auto', bottom: 'auto' });
+}
+
 function mountFab($fab) {
-    // v1.0.3: mount on <body>, full stop. #form_sheld subtrees get rebuilt
-    // by ST/theme layers (which evicts children), and transformed ancestors
-    // trap position:fixed. body has neither problem.
+    // v1.0.4: themes put transform/filter on <body> (making it the fixed
+    // containing block) and ST's body has zero height — so bottom/right
+    // anchoring resolves off-screen (the famous "in DOM at 356,-330").
+    // top/left measure from body's ORIGIN, which is the viewport corner
+    // regardless of body height. So: top/left only, everywhere.
     $(document.body).append($fab);
-    const saved = settings().fabPos;
-    if (saved) {
-        const pad = 5, w = 40, h = 40;
-        const right = Math.max(pad, Math.min(window.innerWidth - w - pad, saved.right));
-        const bottom = Math.max(pad, Math.min(window.innerHeight - h - pad, saved.bottom));
-        $fab.css({ right: right + 'px', bottom: bottom + 'px' });
+    let pos = settings().fabPos;
+    if (!pos || typeof pos.left !== 'number' || typeof pos.top !== 'number') {
+        pos = defaultFabPos(); // also migrates old {right,bottom} format
+    } else {
+        pos = clampFabPos(pos.left, pos.top);
     }
+    applyFabPos($fab, pos);
 }
 
 function makeFabDraggable($fab) {
-    let dragging = false, moved = false, startX = 0, startY = 0, startRight = 0, startBottom = 0;
+    let dragging = false, moved = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
     const el = $fab[0];
 
     function start(x, y) {
         dragging = true; moved = false;
         startX = x; startY = y;
         const r = el.getBoundingClientRect();
-        startRight = window.innerWidth - r.right;
-        startBottom = window.innerHeight - r.bottom;
+        startLeft = r.left;
+        startTop = r.top;
     }
     function move(x, y) {
         if (!dragging) return;
         const dx = x - startX, dy = y - startY;
         if (Math.abs(dx) + Math.abs(dy) > 6) moved = true;
-        const pad = 5, w = 40, h = 40;
-        const right = Math.max(pad, Math.min(window.innerWidth - w - pad, startRight - dx));
-        const bottom = Math.max(pad, Math.min(window.innerHeight - h - pad, startBottom - dy));
-        el.style.right = right + 'px';
-        el.style.bottom = bottom + 'px';
+        const pos = clampFabPos(startLeft + dx, startTop + dy);
+        el.style.left = pos.left + 'px';
+        el.style.top = pos.top + 'px';
     }
     function end() {
         if (!dragging) return;
         dragging = false;
         if (moved) {
             const r = el.getBoundingClientRect();
-            settings().fabPos = {
-                right: window.innerWidth - r.right,
-                bottom: window.innerHeight - r.bottom,
-            };
+            settings().fabPos = { left: r.left, top: r.top };
             saveSettings();
         }
     }
@@ -395,6 +410,14 @@ function makeFabDraggable($fab) {
     el.addEventListener('mousedown', e => start(e.clientX, e.clientY));
     window.addEventListener('mousemove', e => move(e.clientX, e.clientY));
     window.addEventListener('mouseup', () => { const wasMoved = moved; const wasDragging = dragging; end(); if (wasDragging && !wasMoved) togglePanel(); });
+
+    // orientation / keyboard changes: pull the FAB back on-screen
+    window.addEventListener('resize', () => {
+        const r = el.getBoundingClientRect();
+        const pos = clampFabPos(r.left, r.top);
+        el.style.left = pos.left + 'px';
+        el.style.top = pos.top + 'px';
+    });
 }
 
 function panelHtml() {
@@ -437,10 +460,28 @@ function panelHtml() {
     </div>`;
 }
 
+function positionPanel() {
+    const $p = $('#fortuna-panel');
+    const fab = document.getElementById('fortuna-fab');
+    if (!$p.length) return;
+    const pw = Math.min(280, window.innerWidth - 20);
+    const ph = $p.outerHeight() || 320;
+    let left = window.innerWidth - pw - 10;
+    let top = Math.round(window.innerHeight * 0.18);
+    if (fab) {
+        const r = fab.getBoundingClientRect();
+        top = r.top - ph - 10;                 // prefer above the FAB
+        if (top < 10) top = r.bottom + 10;     // else below
+        if (top + ph > window.innerHeight - 10) top = Math.max(10, window.innerHeight - ph - 10);
+        left = Math.max(10, Math.min(window.innerWidth - pw - 10, r.right - pw));
+    }
+    $p.css({ left: left + 'px', top: top + 'px', right: 'auto', bottom: 'auto' });
+}
+
 function togglePanel() {
     const $p = $('#fortuna-panel');
     if ($p.is(':visible')) $p.hide();
-    else { refreshPanel(); $p.show(); }
+    else { refreshPanel(); $p.show(); positionPanel(); }
 }
 
 function refreshPanel() {
@@ -673,7 +714,7 @@ jQuery(async () => {
         await registerCommands();
         setTimeout(renderAllChips, 1000);
         console.log(TAG, '✅ the Fates are watching');
-        try { toastr.success('v1.0.3 loaded — the Fates are watching.', '🎲 Fortuna', { timeOut: 3000 }); } catch (_) { /* */ }
+        try { toastr.success('v1.0.4 loaded — the Fates are watching.', '🎲 Fortuna', { timeOut: 3000 }); } catch (_) { /* */ }
     } catch (e) {
         console.error(TAG, '❌ critical failure', e);
         try { toastr.error('Fortuna failed to initialize.', 'Fortuna', { timeOut: 10000 }); } catch (_) { /* */ }
