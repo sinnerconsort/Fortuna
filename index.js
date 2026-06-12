@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- *  FORTUNA v1.0.2 — The Fates roll, the prose obeys.
+ *  FORTUNA v1.0.3 — The Fates roll, the prose obeys.
  * ═══════════════════════════════════════════════════════════════════
  *  Honest dice for SillyTavern. JS rolls (real rejection sampling,
  *  because we keep our promises), the model only narrates.
@@ -335,24 +335,17 @@ $(document).on('click', '.fortuna-chip', function () {
 // FAB + panel (mobile-first, inline styles, trap probe mount)
 // ─────────────────────────────────────────────────────────────────
 
-const FAB_STYLE = `position:fixed;right:15px;bottom:180px;width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#5a4a7a,#2e2542);color:#e8e0f5;border:1px solid rgba(180,160,220,0.4);box-shadow:0 2px 8px rgba(0,0,0,0.45);z-index:${Z};display:flex;align-items:center;justify-content:center;font-size:18px;cursor:pointer;touch-action:none;`;
+const FAB_STYLE = `position:fixed;right:15px;bottom:290px;width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#5a4a7a,#2e2542);color:#e8e0f5;border:2px solid rgba(212,175,55,0.75);box-shadow:0 2px 8px rgba(0,0,0,0.45);z-index:${Z};display:flex;align-items:center;justify-content:center;font-size:18px;cursor:pointer;touch-action:none;`;
 const PANEL_STYLE = `position:fixed;right:10px;bottom:230px;width:min(280px, calc(100vw - 20px));background:rgba(24,19,36,0.97);border:1px solid rgba(180,160,220,0.35);border-radius:12px;padding:12px;z-index:${Z};color:#e8e0f5;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,0.55);display:none;`;
 const ROW = 'display:flex;align-items:center;justify-content:space-between;gap:8px;margin:7px 0;';
 const SELECT = 'background:#1c1530;color:#e8e0f5;border:1px solid rgba(180,160,220,0.3);border-radius:6px;padding:3px 6px;font-size:12px;max-width:140px;';
 const BTN = 'background:#3a2f55;color:#e8e0f5;border:1px solid rgba(180,160,220,0.3);border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer;flex:1;text-align:center;';
 
 function mountFab($fab) {
-    const host = $('#form_sheld').length ? $('#form_sheld') : $('body');
-    host.append($fab);
-    // trap probe: transformed/filtered ancestors hijack position:fixed
-    $fab.css({ left: '0px', top: '0px', right: 'auto', bottom: 'auto' });
-    const r = $fab[0].getBoundingClientRect();
-    if (Math.abs(r.left) > 1 || Math.abs(r.top) > 1) {
-        $(document.body).append($fab); // append = move; listeners survive
-        console.warn(TAG, 'host is a transformed containing block — FAB mounted on <body>');
-    }
-    $fab.css({ left: '', top: '', right: '15px', bottom: '180px' });
-    // restore saved position, clamped to live viewport
+    // v1.0.3: mount on <body>, full stop. #form_sheld subtrees get rebuilt
+    // by ST/theme layers (which evicts children), and transformed ancestors
+    // trap position:fixed. body has neither problem.
+    $(document.body).append($fab);
     const saved = settings().fabPos;
     if (saved) {
         const pad = 5, w = 40, h = 40;
@@ -508,6 +501,19 @@ function destroyUI() {
     $('#fortuna-fab, #fortuna-panel').remove();
 }
 
+let keepaliveTimer = null;
+function startKeepalive() {
+    if (keepaliveTimer) clearInterval(keepaliveTimer);
+    keepaliveTimer = setInterval(() => {
+        try {
+            if (!document.getElementById('fortuna-fab') || !document.getElementById('fortuna-panel')) {
+                console.warn(TAG, 'UI evicted — resurrecting');
+                initUI();
+            }
+        } catch (e) { /* non-critical */ }
+    }, 4000);
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Slash commands (layered: modern parser → legacy fallback)
 // ─────────────────────────────────────────────────────────────────
@@ -536,6 +542,12 @@ function cmdSnooze() {
     return String(chatState().snooze);
 }
 
+function cmdPanel() {
+    if (!document.getElementById('fortuna-fab')) initUI();
+    togglePanel();
+    return '';
+}
+
 function cmdDebug() {
     const s = settings();
     const lines = [
@@ -546,6 +558,13 @@ function cmdDebug() {
         `snooze (chat): ${chatState().snooze}`,
         `pinned: ${pinnedRoll ? `C${pinnedRoll.clotho}/L${pinnedRoll.lachesis}/A${pinnedRoll.atropos}` : 'none'}`,
         `pending: ${pendingRoll ? 'yes' : 'no'}`,
+        (() => {
+            const el = document.getElementById('fortuna-fab');
+            if (!el) return 'fab: ❌ MISSING from DOM';
+            const r = el.getBoundingClientRect();
+            const vis = r.width > 0 && r.right > 0 && r.bottom > 0 && r.left < window.innerWidth && r.top < window.innerHeight;
+            return `fab: in DOM at ${Math.round(r.left)},${Math.round(r.top)} ${vis ? '(on-screen)' : '⚠️ OFF-SCREEN'} parent=${el.parentElement?.tagName}`;
+        })(),
     ].join('<br>');
     toastr.info(lines, '🎲 Fortuna state', { timeOut: 9000, escapeHtml: false });
     return '';
@@ -565,6 +584,11 @@ async function registerCommands() {
                 callback: cmdRoll,
                 unnamedArgumentList: A ? [A.fromProps({ description: 'dice formula, e.g. 1d20 or 3d6', typeList: T ? [T.STRING] : undefined, isRequired: false })] : [],
                 helpString: 'Roll honest dice (default 1d20). Returns the total.',
+            }));
+            P.addCommandObject(C.fromProps({
+                name: 'fortuna',
+                callback: cmdPanel,
+                helpString: 'Open the Fortuna panel (remounts the FAB if missing).',
             }));
             P.addCommandObject(C.fromProps({
                 name: 'fortuna-snooze',
@@ -594,6 +618,7 @@ async function registerCommands() {
         }
         if (typeof legacy === 'function') {
             legacy('fortuna-roll', (_a, v) => cmdRoll(_a, v), [], '– roll honest dice (default 1d20)', true, true);
+            legacy('fortuna', () => cmdPanel(), [], '– open the Fortuna panel', true, true);
             legacy('fortuna-snooze', () => cmdSnooze(), [], '– toggle scene snooze', true, true);
             legacy('fortuna-debug', () => cmdDebug(), [], '– show Fortuna state', true, true);
             console.log(TAG, 'slash commands registered (legacy)');
@@ -643,11 +668,12 @@ jQuery(async () => {
         console.log(TAG, 'spinning the thread…');
         settings(); // hydrate defaults
         initUI();
+        startKeepalive();
         registerEvents();
         await registerCommands();
         setTimeout(renderAllChips, 1000);
         console.log(TAG, '✅ the Fates are watching');
-        try { toastr.success('v1.0.2 loaded — the Fates are watching.', '🎲 Fortuna', { timeOut: 3000 }); } catch (_) { /* */ }
+        try { toastr.success('v1.0.3 loaded — the Fates are watching.', '🎲 Fortuna', { timeOut: 3000 }); } catch (_) { /* */ }
     } catch (e) {
         console.error(TAG, '❌ critical failure', e);
         try { toastr.error('Fortuna failed to initialize.', 'Fortuna', { timeOut: 10000 }); } catch (_) { /* */ }
