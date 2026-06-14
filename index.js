@@ -161,6 +161,35 @@ function lachesisBand(y) {
     return 'bold / daring, possibly reckless';
 }
 
+// ─── Codex bridge: aim events at loaded threads ──────────────────────────────
+// Atropos still decides IF an event happens and its type/severity, in JS. Codex
+// only supplies WHAT the complication can attach to — the thread the story is
+// actually carrying — so bigger events land on loaded ground instead of random
+// ground. Degrades silently to generic events if Codex is absent or has nothing.
+function topLoadedThread() {
+    try {
+        const api = window.CodexAPI;
+        if (!api || api.isActive?.() === false) return null;
+
+        let list = null;
+        if (typeof api.getLoadedThreads === 'function') {
+            list = api.getLoadedThreads(3);                 // already ranked
+        } else if (typeof api.getActiveThreads === 'function') {
+            // Fallback for older Codex: rank locally (climax > escalating > building, primary first).
+            const w = { climax: 2, escalating: 1, building: 0 };
+            list = (api.getActiveThreads() || []).slice().sort((a, b) => {
+                const pa = a.priority === 'primary' ? 1 : 0;
+                const pb = b.priority === 'primary' ? 1 : 0;
+                if (pb !== pa) return pb - pa;
+                return (w[b.status] ?? 0) - (w[a.status] ?? 0);
+            });
+        }
+        return Array.isArray(list) && list.length ? list[0] : null;
+    } catch (e) {
+        return null;
+    }
+}
+
 function buildInjection(roll) {
     const mod = DIFFICULTY_MOD[roll.difficulty] ?? 0;
     const modLine = mod === 0
@@ -168,8 +197,17 @@ function buildInjection(roll) {
         : `Global modifier: ${mod > 0 ? '+' + mod : mod} (apply to dice before comparing to DC; natural 1s and 20s are judged on the raw die).`;
 
     const eventText = resolveAtropos(roll.atropos, roll.cadence);
+    // Anchor only the plot-ish tiers (rumor / interruption / opportunity /
+    // complication — z >= 15). Small ambient events stay incidental.
+    let anchor = '';
+    if (eventText && roll.atropos >= 15) {
+        const t = topLoadedThread();
+        if (t && t.name) {
+            anchor = ` If it can plausibly touch the open thread "${t.name}"${t.status ? ` (${t.status})` : ''}, let it land there; otherwise keep it incidental.`;
+        }
+    }
     const atroposLine = eventText
-        ? `• Atropos (event die): this turn, ${eventText}. Weave it in naturally; skip it silently if it would break the scene's tone or intimacy.`
+        ? `• Atropos (event die): this turn, ${eventText}.${anchor} Weave it in naturally; skip it silently if it would break the scene's tone or intimacy.`
         : '• Atropos (event die): the thread holds — no outside event this turn.';
 
     return [
