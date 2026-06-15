@@ -413,49 +413,88 @@ function mountFab($fab) {
     applyFabPos($fab, pos);
 }
 
-function makeFabDraggable($fab) {
-    let dragging = false, moved = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
-    const el = $fab[0];
+// FAB drag state lives at module scope so a single, page-lifetime set of
+// window listeners can drive it — no matter how many times the FAB remounts.
+const fabDrag = { active: false, moved: false, startX: 0, startY: 0, startLeft: 0, startTop: 0, touchedAt: 0 };
+let fabWindowListenersBound = false;
+const FAB_DRAG_THRESHOLD = 6;
 
-    function start(x, y) {
-        dragging = true; moved = false;
-        startX = x; startY = y;
+function fabEl() { return document.getElementById('fortuna-fab'); }
+
+function fabBegin(x, y) {
+    const el = fabEl(); if (!el) return;
+    fabDrag.active = true; fabDrag.moved = false;
+    fabDrag.startX = x; fabDrag.startY = y;
+    const r = el.getBoundingClientRect();
+    fabDrag.startLeft = r.left;
+    fabDrag.startTop = r.top;
+}
+function fabMove(x, y) {
+    if (!fabDrag.active) return;
+    const el = fabEl(); if (!el) return;
+    const dx = x - fabDrag.startX, dy = y - fabDrag.startY;
+    if (Math.abs(dx) + Math.abs(dy) > FAB_DRAG_THRESHOLD) fabDrag.moved = true;
+    const pos = clampFabPos(fabDrag.startLeft + dx, fabDrag.startTop + dy);
+    el.style.left = pos.left + 'px';
+    el.style.top = pos.top + 'px';
+}
+function fabEnd() {
+    if (!fabDrag.active) return;
+    fabDrag.active = false;
+    const el = fabEl(); if (!el) return;
+    if (fabDrag.moved) {
         const r = el.getBoundingClientRect();
-        startLeft = r.left;
-        startTop = r.top;
+        settings().fabPos = { left: r.left, top: r.top };
+        saveSettings();
+    } else {
+        togglePanel(); // clean tap → toggle, exactly once
     }
-    function move(x, y) {
-        if (!dragging) return;
-        const dx = x - startX, dy = y - startY;
-        if (Math.abs(dx) + Math.abs(dy) > 6) moved = true;
-        const pos = clampFabPos(startLeft + dx, startTop + dy);
-        el.style.left = pos.left + 'px';
-        el.style.top = pos.top + 'px';
-    }
-    function end() {
-        if (!dragging) return;
-        dragging = false;
-        if (moved) {
-            const r = el.getBoundingClientRect();
-            settings().fabPos = { left: r.left, top: r.top };
-            saveSettings();
-        }
-    }
+}
 
-    el.addEventListener('touchstart', e => { const t = e.touches[0]; start(t.clientX, t.clientY); }, { passive: true });
-    el.addEventListener('touchmove', e => { if (dragging) { e.preventDefault(); const t = e.touches[0]; move(t.clientX, t.clientY); } }, { passive: false });
-    el.addEventListener('touchend', () => { const wasMoved = moved; end(); if (!wasMoved) togglePanel(); });
-    el.addEventListener('mousedown', e => start(e.clientX, e.clientY));
-    window.addEventListener('mousemove', e => move(e.clientX, e.clientY));
-    window.addEventListener('mouseup', () => { const wasMoved = moved; const wasDragging = dragging; end(); if (wasDragging && !wasMoved) togglePanel(); });
-
+// Bound a single time for the life of the page; safe to call on every remount.
+function bindFabWindowListeners() {
+    if (fabWindowListenersBound) return;
+    fabWindowListenersBound = true;
+    window.addEventListener('mousemove', e => { if (fabDrag.active) fabMove(e.clientX, e.clientY); });
+    window.addEventListener('mouseup', () => { if (fabDrag.active) fabEnd(); });
     // orientation / keyboard changes: pull the FAB back on-screen
     window.addEventListener('resize', () => {
+        const el = fabEl(); if (!el) return;
         const r = el.getBoundingClientRect();
         const pos = clampFabPos(r.left, r.top);
         el.style.left = pos.left + 'px';
         el.style.top = pos.top + 'px';
     });
+}
+
+function makeFabDraggable($fab) {
+    const el = $fab[0];
+
+    // These listeners are attached to the FAB element itself, so they are
+    // garbage-collected with it when initUI() removes-and-recreates the FAB.
+    el.addEventListener('touchstart', e => {
+        fabDrag.touchedAt = Date.now();
+        const t = e.touches[0]; fabBegin(t.clientX, t.clientY);
+    }, { passive: true });
+    el.addEventListener('touchmove', e => {
+        if (!fabDrag.active) return;
+        e.preventDefault();
+        const t = e.touches[0]; fabMove(t.clientX, t.clientY);
+    }, { passive: false });
+    el.addEventListener('touchend', e => {
+        fabDrag.touchedAt = Date.now();
+        e.preventDefault(); // suppress the synthetic mousedown/up that caused the double-toggle
+        fabEnd();
+    }, { passive: false });
+    el.addEventListener('touchcancel', () => { fabDrag.active = false; fabDrag.moved = false; });
+    el.addEventListener('mousedown', e => {
+        if (e.button !== 0) return;
+        if (Date.now() - fabDrag.touchedAt < 700) return; // touch-spawned synthetic event
+        fabBegin(e.clientX, e.clientY);
+    });
+
+    // Window-level drag/resize handlers — registered once, not per remount.
+    bindFabWindowListeners();
 }
 
 function panelHtml() {
@@ -516,10 +555,49 @@ function positionPanel() {
     $p.css({ left: left + 'px', top: top + 'px', right: 'auto', bottom: 'auto' });
 }
 
+// Holds the bound outside-dismiss handler so we can remove it on close.
+let fortunaOutsideHandler = null;
+
+function bindOutsideDismiss() {
+    if (fortunaOutsideHandler) return;
+    fortunaOutsideHandler = (e) => {
+        const panel = document.getElementById('fortuna-panel');
+        const fab = document.getElementById('fortuna-fab');
+        if (!panel) return;
+        if (panel.contains(e.target)) return;          // tap inside the panel
+        if (fab && fab.contains(e.target)) return;      // tap on the FAB (it toggles itself)
+        closePanel();
+    };
+    // Defer one tick so the tap that opened the panel can't immediately close it.
+    setTimeout(() => {
+        if (!fortunaOutsideHandler) return;
+        document.addEventListener('touchstart', fortunaOutsideHandler, { passive: true });
+        document.addEventListener('mousedown', fortunaOutsideHandler, true);
+    }, 0);
+}
+
+function unbindOutsideDismiss() {
+    if (!fortunaOutsideHandler) return;
+    document.removeEventListener('touchstart', fortunaOutsideHandler, { passive: true });
+    document.removeEventListener('mousedown', fortunaOutsideHandler, true);
+    fortunaOutsideHandler = null;
+}
+
+function openPanel() {
+    refreshPanel();
+    $('#fortuna-panel').show();
+    positionPanel();
+    bindOutsideDismiss();
+}
+
+function closePanel() {
+    $('#fortuna-panel').hide();
+    unbindOutsideDismiss();
+}
+
 function togglePanel() {
-    const $p = $('#fortuna-panel');
-    if ($p.is(':visible')) $p.hide();
-    else { refreshPanel(); $p.show(); positionPanel(); }
+    if ($('#fortuna-panel').is(':visible')) closePanel();
+    else openPanel();
 }
 
 function refreshPanel() {
@@ -542,13 +620,14 @@ function updatePanelPinned() {
 }
 
 function initUI() {
+    unbindOutsideDismiss(); // fresh panel starts hidden; drop any stale listener
     $('#fortuna-fab, #fortuna-panel').remove();
     const $fab = $(`<div id="fortuna-fab" style="${FAB_STYLE}" title="Fortuna">🎲</div>`);
     mountFab($fab);
     makeFabDraggable($fab);
     $('body').append(panelHtml());
 
-    $('#fortuna-close').on('click', () => $('#fortuna-panel').hide());
+    $('#fortuna-close').on('click', () => closePanel());
     $('#fortuna-enabled').on('change', function () {
         settings().enabled = $(this).prop('checked');
         saveSettings();
@@ -577,6 +656,7 @@ function initUI() {
 }
 
 function destroyUI() {
+    unbindOutsideDismiss();
     $('#fortuna-fab, #fortuna-panel').remove();
 }
 
