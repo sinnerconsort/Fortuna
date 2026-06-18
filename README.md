@@ -1,4 +1,4 @@
-# 🎲 Fortuna v2.0.0
+# 🎲 Fortuna v2.0.1
 
 Honest dice for SillyTavern. JavaScript rolls (crypto RNG with real rejection
 sampling); the model only narrates. Every roll leaves a receipt.

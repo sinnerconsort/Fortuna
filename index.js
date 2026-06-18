@@ -232,7 +232,15 @@ function readCodex() {
         const state = api.getActiveState?.() || null;   // { name, express, suppress }
         const vad = api.getEmotionalState?.() || null;   // { valence, arousal, dominance, label }
         if (!state && !vad) return null;
-        return { state, vad };
+        // Codex models ONE character. Capture WHOSE state this is so the modifier
+        // can be attributed and gated — otherwise the model thrashes on "whose
+        // number is this?" in any multi-actor scene. Best-effort from ST context.
+        let focal = '';
+        try {
+            const c = ctx();
+            focal = c?.name2 || c?.characters?.[c?.characterId]?.name || '';
+        } catch (_) { /* */ }
+        return { state, vad, focal };
     } catch (e) { return null; }
 }
 
@@ -253,16 +261,20 @@ function buildModifierLines(roll, codex, chron) {
     const dial = DIFFICULTY_MOD[roll.difficulty] ?? 0;
     const lines = [`    · Difficulty dial: ${dial >= 0 ? '+' + dial : dial} (player-set; applies to every check this turn).`];
 
-    if (codex?.state) {
-        const exp = codex.state.express ? ` — expresses: "${codex.state.express}"` : '';
-        lines.push(`    · Active disposition "${codex.state.name}"${exp}. If the relevant character acts IN LINE with this, +2; if they act AGAINST it (suppressing it), −2.`);
-    }
-    if (codex?.vad) {
-        const v = codex.vad;
-        lines.push(`    · Emotional state: ${v.label || 'neutral'} (valence ${v.valence}, arousal ${v.arousal}, dominance ${v.dominance}). Strong feeling drives the body — an agitated actor pushing toward their drive rolls easier (up to +3); one forced against it rolls harder (down to −3). This is how a card's default "shy" loses to real frustration: the state, not the card, sets the bend.`);
+    if (codex?.state || codex?.vad) {
+        const who = codex.focal || 'the character Codex is tracking';
+        lines.push(`    · SUBJECT — the reading(s) below describe ${who} ONLY. Apply them solely to ${who}'s own action. If a DIFFERENT character takes the resolved action, ignore them and use the dial + phase alone. If a reading plainly contradicts what ${who} is doing in the scene, trust the scene and omit it. (Codex models one character; do not spread these onto others.)`);
+        if (codex.state) {
+            const exp = codex.state.express ? ` — expresses: "${codex.state.express}"` : '';
+            lines.push(`    · ${who}'s disposition "${codex.state.name}"${exp}. If ${who} acts IN LINE with this, +2; AGAINST it (suppressing it), −2.`);
+        }
+        if (codex.vad) {
+            const v = codex.vad;
+            lines.push(`    · ${who}'s emotional state: ${v.label || 'neutral'} (valence ${v.valence}, arousal ${v.arousal}, dominance ${v.dominance}). Strong feeling drives the body — if ${who} pushes toward this drive, easier (up to +3); if forced against it, harder (down to −3). This is how a card's default "shy" loses to real frustration: the state, not the card, sets the bend.`);
+        }
     }
     if (chron) {
-        lines.push(`    · World phase "${chron.title}"${chron.genre ? ` (${chron.genre})` : ''}: a check may bend ±1 toward the phase's pressure.`);
+        lines.push(`    · World phase "${chron.title}"${chron.genre ? ` (${chron.genre})` : ''}: a check may bend ±1 toward the phase's pressure (applies to any actor).`);
     }
     if (!codex && !chron) {
         lines.push('    · No Codex or Chronicler readings reached Fortuna this turn — resolve on the dial and plain context alone.');
@@ -314,7 +326,7 @@ function buildInjection(roll) {
         '══ RESOLUTION — for any action with a real chance of failure (ordinary talk needs no roll) ══',
         'Work these five steps in your reasoning BEFORE writing prose, in order. Do not narrate until all five are committed.',
         '',
-        '1 ▸ ACTION — name the single primary action this die resolves.',
+        '1 ▸ ACTION — name the single primary action this die resolves. (If several characters act independently this turn, Clotho resolves the most consequential action; each further independent action draws the next surplus-pool die, in order. One die never covers two actors.)',
         `2 ▸ DC — set the target from the task's base difficulty. One pinned value, never a range:`,
         `      ${DC_LADDER}`,
         '3 ▸ STAKES — commit NOW, before reading the die. What does success get? What does failure COST at its core? Then flag reversibility:',
@@ -962,7 +974,7 @@ jQuery(async () => {
         await registerCommands();
         setTimeout(renderAllChips, 1000);
         console.log(TAG, '✅ the Fates are watching');
-        try { toastr.success('v2.0.0 loaded — the Fates are watching, and they keep score.', '🎲 Fortuna', { timeOut: 3000 }); } catch (_) { /* */ }
+        try { toastr.success('v2.0.1 loaded — the Fates are watching, and they keep score.', '🎲 Fortuna', { timeOut: 3000 }); } catch (_) { /* */ }
     } catch (e) {
         console.error(TAG, '❌ critical failure', e);
         try { toastr.error('Fortuna failed to initialize.', 'Fortuna', { timeOut: 10000 }); } catch (_) { /* */ }
