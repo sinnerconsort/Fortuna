@@ -1,27 +1,52 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- *  FORTUNA v1.0.4 — The Fates roll, the prose obeys.
+ *  FORTUNA v2.0.0 — The Fates roll, the prose obeys.
  * ═══════════════════════════════════════════════════════════════════
  *  Honest dice for SillyTavern. JS rolls (real rejection sampling,
  *  because we keep our promises), the model only narrates.
  *
  *  The three Fates:
- *    • Clotho   — action die (d20). Resolves attempted actions.
+ *    • Clotho   — action die (d20). The raw roll for the turn's
+ *                 primary attempted action.
  *    • Lachesis — intensity die (d20). How boldly NPCs act.
  *    • Atropos  — event die (d20). Outside complications, resolved
  *                 table-side in JS; only the OUTCOME is injected.
  *  Plus a surplus pool of 5 unlabeled d20s for additional checks —
  *  consumed strictly in order, never reused, never invented.
  *
- *  Design rules:
- *    • FAILURE FORKS, NEVER WALLS (Disco Elysium rule, always on).
- *    • Every roll leaves a receipt (chip under the message).
- *    • Stateless v1.0 — no per-chat memory beyond snooze + receipts.
+ *  ── RESOLUTION MODEL (v2 — the rewrite) ──
+ *  Fortuna owns MAGNITUDE; the triad owns every DIRECTION. A roll
+ *  resolves HOW WELL an attempt lands, never WHICH action is taken
+ *  or where the plot goes. The contract the model must transcribe in
+ *  its reasoning BEFORE prose:
+ *    1. DC from a fixed nine-rung ladder (Trivial 6 … Impossible 18).
+ *    2. STAKES committed before the die is read — core cost + a
+ *       reversibility flag (OPEN / FRAGILE / TERMINAL). This is the
+ *       load-bearing anti-plot-armor mechanic: commit the risk before
+ *       you know the result, and you can't lowball it after.
+ *    3. MODIFIER as "skill" — the DC is fixed; context enters as a
+ *       bounded ± to the ROLL. Read live from the triad if present:
+ *       Codex disposition + VAD, Chronicler world phase. Degrades to
+ *       the difficulty dial alone if siblings are absent.
+ *    4. Eight outcome BANDS by margin (blast radius of the cost),
+ *       never softening whether the core happens.
+ *    5. A FENCE scoped to THIS resolved attempt only — no convenient
+ *       rescue, no unearned mercy, no retry on TERMINAL stakes. Never
+ *       touches arc direction (Chronicler) or feelings (Codex).
+ *
+ *  Triad reads (all optional, all read-only, all defensive):
+ *    • CodexAPI    → getActiveState / getEmotionalState  (the modifier)
+ *    • ChroniclerAPI → getActiveRung / getActiveEra        (phase ±1)
+ *    • CodexAPI    → getLoadedThreads  (where a failure's cost lands)
+ *  Fortuna NEVER calls a triad write-verb. Direction stays theirs.
+ *
+ *  Phase B (not in this file): FortunaAPI.getFlowPressure() for the
+ *  Chronicler walker to READ; JS-tracked FRAGILE integers via a
+ *  receipt parser. Both deferred until the contract is proven to bind.
  *
  *  v1.1 stub: ERIS EVENTS — world-specific chaos variables generated
  *  via utility call against lore fractures, stored extension-local,
- *  fired by Atropos ranges. (see buildAtropos comment below)
- *  Future stub: CODEX BRIDGE — wound/stress state → DC modifiers.
+ *  fired by Atropos ranges. (see resolveAtropos comment below)
  *
  *  Mobile-first: FAB on #form_sheld (with trap probe), inline styles,
  *  vanilla-ish JS + jQuery, no console required. Drop-in single file.
@@ -190,11 +215,73 @@ function topLoadedThread() {
     }
 }
 
+// The fixed DC ladder — DE difficulty names, one pinned number each (NOT ranges;
+// a single value is strictly more binding than "pick something in 11-15"). The
+// top rungs sit a pip apart on purpose — they only separate once modifiers swing.
+const DC_LADDER = 'Trivial 6 · Easy 8 · Medium 10 · Challenging 12 · Formidable 13 · Legendary 14 · Heroic 15 · Godly 16 · Impossible 18';
+
+// ─── Triad readers — all optional, all read-only, all defensive ──────────────
+// Fortuna reads the triad's NOUNS (a disposition, a phase, a thread) and turns
+// them into a bounded ± on the ROLL. It never reads or calls a write-verb, and
+// every reader degrades to null the instant a sibling is absent or mid-load.
+
+function readCodex() {
+    try {
+        const api = window.CodexAPI;
+        if (!api || api.isActive?.() === false) return null;
+        const state = api.getActiveState?.() || null;   // { name, express, suppress }
+        const vad = api.getEmotionalState?.() || null;   // { valence, arousal, dominance, label }
+        if (!state && !vad) return null;
+        return { state, vad };
+    } catch (e) { return null; }
+}
+
+function readChronicler() {
+    try {
+        const api = window.ChroniclerAPI;
+        if (!api || api.isActive?.() === false) return null;
+        const rung = api.getActiveRung?.() || null;      // { title, genre, situation, ... }
+        if (!rung || !rung.title) return null;
+        return { title: rung.title, genre: rung.genre || '' };
+    } catch (e) { return null; }
+}
+
+// Builds the MODIFIER section. The difficulty dial is JS-fixed and always shown
+// (itemizable, even at +0). Codex/Chronicler lines appear only when present, so
+// the block is honest about exactly what fed the roll this turn.
+function buildModifierLines(roll, codex, chron) {
+    const dial = DIFFICULTY_MOD[roll.difficulty] ?? 0;
+    const lines = [`    · Difficulty dial: ${dial >= 0 ? '+' + dial : dial} (player-set; applies to every check this turn).`];
+
+    if (codex?.state) {
+        const exp = codex.state.express ? ` — expresses: "${codex.state.express}"` : '';
+        lines.push(`    · Active disposition "${codex.state.name}"${exp}. If the relevant character acts IN LINE with this, +2; if they act AGAINST it (suppressing it), −2.`);
+    }
+    if (codex?.vad) {
+        const v = codex.vad;
+        lines.push(`    · Emotional state: ${v.label || 'neutral'} (valence ${v.valence}, arousal ${v.arousal}, dominance ${v.dominance}). Strong feeling drives the body — an agitated actor pushing toward their drive rolls easier (up to +3); one forced against it rolls harder (down to −3). This is how a card's default "shy" loses to real frustration: the state, not the card, sets the bend.`);
+    }
+    if (chron) {
+        lines.push(`    · World phase "${chron.title}"${chron.genre ? ` (${chron.genre})` : ''}: a check may bend ±1 toward the phase's pressure.`);
+    }
+    if (!codex && !chron) {
+        lines.push('    · No Codex or Chronicler readings reached Fortuna this turn — resolve on the dial and plain context alone.');
+    }
+    return lines.join('\n');
+}
+
 function buildInjection(roll) {
-    const mod = DIFFICULTY_MOD[roll.difficulty] ?? 0;
-    const modLine = mod === 0
-        ? 'No global modifier.'
-        : `Global modifier: ${mod > 0 ? '+' + mod : mod} (apply to dice before comparing to DC; natural 1s and 20s are judged on the raw die).`;
+    const codex = readCodex();
+    const chron = readChronicler();
+    const modLines = buildModifierLines(roll, codex, chron);
+
+    // Stash what fed the roll onto the roll object, so the receipt chip can audit
+    // Fortuna's INPUTS (the receipts principle, applied to context not just dice).
+    roll.context = {
+        difficulty: roll.difficulty,
+        codex: codex ? (codex.state?.name || codex.vad?.label || 'present') : null,
+        chronicler: chron ? chron.title : null,
+    };
 
     const eventText = resolveAtropos(roll.atropos, roll.cadence);
     // Anchor only the plot-ish tiers (rumor / interruption / opportunity /
@@ -210,24 +297,51 @@ function buildInjection(roll) {
         ? `• Atropos (event die): this turn, ${eventText}.${anchor} Weave it in naturally; skip it silently if it would break the scene's tone or intimacy.`
         : '• Atropos (event die): the thread holds — no outside event this turn.';
 
+    // Where a failure's situational cost should land, if the story is carrying a thread.
+    const land = topLoadedThread();
+    const landLine = (land && land.name)
+        ? `• When a failure's cost spills into the situation (SETBACK or worse), prefer to land it on the open thread "${land.name}"${land.status ? ` (${land.status})` : ''} rather than inventing an unrelated complication.`
+        : '';
+
     return [
         '<fortuna>',
-        'THE FATES HAVE ALREADY ROLLED. These dice are pre-rolled and immutable — never invent, alter, or re-roll dice yourself.',
-        `• Clotho (action die): ${roll.clotho}/20 — resolves the primary attempted action this turn (any character's).`,
+        'THE FATES HAVE ALREADY ROLLED. These dice are pre-rolled and immutable — never invent, alter, re-roll, or ignore a die.',
+        `• Clotho (action die): ${roll.clotho}/20 — the raw roll for THIS turn's primary attempted action (any character's).`,
         `• Lachesis (intensity die): ${roll.lachesis}/20 — NPC initiative this turn: ${lachesisBand(roll.lachesis)}.`,
         atroposLine,
         `• Surplus pool for ADDITIONAL checks beyond the first: [${roll.pool.join(', ')}]. Consume strictly left to right, one die per extra check, never reuse a die. If the pool runs out, remaining minor actions resolve as routine — do not invent new dice.`,
         '',
-        'ACTION RESOLUTION (apply silently whenever an action has a meaningful chance of failure; ordinary dialogue needs no roll):',
-        '1. Set a DC from context: 1-5 trivial, 6-10 easy, 11-15 moderate, 16-20 hard, 21+ near-impossible.',
-        `2. ${modLine}`,
-        '3. Die ≥ DC → success. Margin 0: marginal (works, with friction). 1-4: solid. 5-9: great. Natural 20: critical — exceptional, beyond expectation.',
-        '4. Die < DC → failure. Margin 1-3: near miss. 4-7: clear setback. 8-14: costly. 15+ or natural 1: disaster.',
+        '══ RESOLUTION — for any action with a real chance of failure (ordinary talk needs no roll) ══',
+        'Work these five steps in your reasoning BEFORE writing prose, in order. Do not narrate until all five are committed.',
         '',
-        'FAILURE FORKS, NEVER WALLS: every failure must open a different path — a new complication, revelation, pressure, or opportunity — never a dead stop. Worse failures buy more expensive paths, not less story.',
-        'Never announce dice, DCs, margins, or mechanics in the narrative. The fiction stays seamless.',
+        '1 ▸ ACTION — name the single primary action this die resolves.',
+        `2 ▸ DC — set the target from the task's base difficulty. One pinned value, never a range:`,
+        `      ${DC_LADDER}`,
+        '3 ▸ STAKES — commit NOW, before reading the die. What does success get? What does failure COST at its core? Then flag reversibility:',
+        '      OPEN — a later retry or a new angle exists.',
+        '      FRAGILE — a retry exists, but every failed attempt degrades the thing; it will not last forever.',
+        '      TERMINAL — no second attempt (a dropped vase, a spoken word, a fall). Once failed, it stays failed.',
+        '      This commitment is BINDING. After the die is read you may not lower the stakes, shrink the cost, or change the flag. (Committing the risk before you know the result is what stops a failure from being quietly talked smaller.)',
+        '4 ▸ MODIFIER — the DC is fixed; CONTEXT enters as a ± on the ROLL (+ when context favors the actor, − when it opposes). Sum, itemize each, cap the total at ±5:',
+        modLines,
+        '      Natural 1 and natural 20 ignore ALL modifiers — judged on the raw die.',
+        '5 ▸ RESOLVE — total = Clotho (or the next pool die) + modifier. Compare to DC. Read the band:',
+        '      SUCCESS (total ≥ DC): margin 0–1 MARGINAL (works, with a small friction even so) · 2–5 CLEAN (works as intended) · 6+ STRONG (works, plus an edge worth banking) · nat 20 CRITICAL (beyond what was asked).',
+        '      FAILURE (total < DC): margin 1–2 GLANCE (fails; cost falls on the attempt — time, position, a resource; OPEN stakes stay open) · 3–6 SETBACK (fails; cost falls on the situation — ground lost, a complication born FROM the failure; the approach must change) · 7+ COLLAPSE (fails hard; cost falls on something load-bearing — and an OPEN window may slam to TERMINAL here) · nat 1 DISASTER (something breaks beyond the attempt itself).',
+        '      The margin is the BLAST RADIUS — how much breaks AROUND the core — never whether the core happens. The reversibility flag, not the margin, decides retries.',
+        '',
+        '══ THE FENCE — governs THIS resolved attempt only ══',
+        '• Honor the committed stakes and the band. A failure fails for real: the door stays locked, the blow misses, the vase breaks.',
+        '• Forbidden as rescues of a failed attempt: a convenient interruption, an NPC or the environment stepping in to spare the cost, unearned mercy, a second chance with no fresh roll, or quietly shrinking what was at stake. If you catch yourself writing one, the turn is invalid — rewrite it as the failure landing.',
+        '• A fresh attempt is allowed only on OPEN stakes, on a later turn, with a new roll. TERMINAL stakes — and any OPEN window a COLLAPSE slammed shut — get no retry.',
+        "• This fence touches RESOLUTION only. It does not dictate where the story goes, how anyone FEELS about the outcome, or whether unrelated events occur — those belong to the world and the characters, not to this die. Failure may simply cost; it owes no silver lining, and not every failure needs a new door.",
+        eventText ? '• An Atropos event may still occur this turn, but it must never function as a rescue of a failed attempt.' : '',
+        landLine,
+        '',
+        'Never announce dice, DCs, margins, or band names in the prose — the fiction stays seamless. Leave exactly one audit line in your reasoning:',
+        '      FORTUNA ▸ <action> | DC <n> <tier> | <die> <±mods itemized> = <total> | <BAND> | <core cost> [<FLAG>]',
         '</fortuna>',
-    ].join('\n');
+    ].filter(Boolean).join('\n');
 }
 
 function applyInjection(roll) {
@@ -322,10 +436,22 @@ function chipHtml(roll, snoozedAtTime) {
     if (!roll) return '';
     const eventText = resolveAtropos(roll.atropos, roll.cadence);
     const aShort = eventText ? `A${roll.atropos}✂` : `A${roll.atropos}`;
+
+    // Context badges — what fed the roll (receipts principle, applied to inputs).
+    const cx = roll.context || {};
+    const badges = [];
+    if (cx.codex) badges.push(`🧠 ${cx.codex}`);
+    if (cx.chronicler) badges.push(`📖 ${cx.chronicler}`);
+    const badgeShort = badges.length ? `<span style="opacity:0.6">· ${badges.join(' · ')}</span>` : '';
+    const fedRow = (cx.codex || cx.chronicler)
+        ? `<div style="opacity:0.65">Fed the roll: ⚙ ${DIFFICULTY_LABEL[roll.difficulty] || roll.difficulty}${cx.codex ? ` · 🧠 Codex: ${cx.codex}` : ''}${cx.chronicler ? ` · 📖 ${cx.chronicler}` : ''}</div>`
+        : `<div style="opacity:0.5">Fed the roll: ⚙ ${DIFFICULTY_LABEL[roll.difficulty] || roll.difficulty} · no triad readings reached Fortuna</div>`;
+
     return `
         <div class="fortuna-chip" style="${CHIP_BASE}" title="Fortuna — tap for the full cast">
             <span>🎲</span>
             <span>C${roll.clotho} · L${roll.lachesis} · ${aShort}</span>
+            ${badgeShort}
             <span style="opacity:0.6">▾</span>
         </div>
         <div class="fortuna-detail" style="${DETAIL_BASE}">
@@ -333,6 +459,7 @@ function chipHtml(roll, snoozedAtTime) {
             <div><b>Lachesis</b> (intensity): ${roll.lachesis}/20 — ${lachesisBand(roll.lachesis)}</div>
             <div><b>Atropos</b> (event): ${roll.atropos}/20 — ${eventText ? eventText : 'the thread holds'}</div>
             <div><b>Pool</b>: [${roll.pool.join(', ')}]</div>
+            ${fedRow}
             <div style="opacity:0.65">Difficulty: ${DIFFICULTY_LABEL[roll.difficulty] || roll.difficulty}${roll.pinned ? ' · pre-rolled' : ''}</div>
         </div>`;
 }
@@ -818,9 +945,12 @@ function registerEvents() {
     on(t.GENERATION_STOPPED, () => { pendingRoll = null; }, 'GENERATION_STOPPED');
 }
 
-// FUTURE — CODEX BRIDGE (do not build until Codex visibility pass ships):
-// if (window.CodexAPI?.getActiveStates) { wounded → DC +2..5; 'breaks-like'
-// active under stress → tighten failure margins. Inject as one extra line. }
+// CODEX / CHRONICLER BRIDGE — SHIPPED (v2.0.0, read-only): buildInjection()
+// reads CodexAPI.getActiveState/getEmotionalState and ChroniclerAPI.getActiveRung
+// and folds them into the MODIFIER section. Defensive: absent siblings degrade to
+// the difficulty dial alone. Fortuna never calls a triad write-verb.
+// PHASE B (not here): FortunaAPI.getFlowPressure() for Chronicler's walker to READ;
+// JS-tracked FRAGILE integers via a receipt parser. Deferred until the contract binds.
 
 jQuery(async () => {
     try {
@@ -832,7 +962,7 @@ jQuery(async () => {
         await registerCommands();
         setTimeout(renderAllChips, 1000);
         console.log(TAG, '✅ the Fates are watching');
-        try { toastr.success('v1.0.4 loaded — the Fates are watching.', '🎲 Fortuna', { timeOut: 3000 }); } catch (_) { /* */ }
+        try { toastr.success('v2.0.0 loaded — the Fates are watching, and they keep score.', '🎲 Fortuna', { timeOut: 3000 }); } catch (_) { /* */ }
     } catch (e) {
         console.error(TAG, '❌ critical failure', e);
         try { toastr.error('Fortuna failed to initialize.', 'Fortuna', { timeOut: 10000 }); } catch (_) { /* */ }
